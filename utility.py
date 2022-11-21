@@ -44,6 +44,11 @@ def getMBR(entries: List[RTreeEntry]) -> box:
             max_y, entry.rect.max_y)
     return box(min_x, min_y, max_x, max_y)
 
+class ERTreeNode:
+    def __init__(self, pk: PaillierPublicKey, node: RTreeNode):
+        self.level = 0
+        self.count = 0
+        
 
 class ERTreeEntry:
     cmpFunctor = None
@@ -73,7 +78,7 @@ class ERTreeEntry:
             #
     def __lt__(self, other):
         if ERTreeEntry.cmpFunctor:
-            return not ERTreeEntry.cmpFunctor(other._score, self.score)
+            return not ERTreeEntry.cmpFunctor(other._score, self._score)
 
 
 def encryptRTree(pk: PaillierPublicKey, t: RTree) -> ERTreeEntry:
@@ -122,7 +127,7 @@ def countRecur(root: ERTreeEntry):
 # 计数每个结点的孩子数
 
 
-def count(root: ERTreeEntry):
+def count(root: ERTreeEntry, pk: phe.PaillierPublicKey):
     countRecur(root)
 
     def fn(root: ERTreeEntry):
@@ -171,7 +176,7 @@ def test_EncryptRTree():
     for i, p in enumerate(points):
         t.insert(p[2:], Rect(p[0], p[1], p[0], p[1]))
     et = encryptRTree(pk, t)
-    # count(et)
+    # count(et, pk)
     # print(et)
     blindEncryptRTree(et)
 
@@ -222,23 +227,28 @@ def blindEncryptRTree(root: ERTreeEntry):
     for lst in res:
         dataArea = []
         for entry in lst:
+            start = len(dataArea)
             for leafEntry in entry._entries:
-                dataArea.extend(leafEntry._data)
-            entry._dataMatrix = [
-                len(dataArea) - len(entry._entries), len(dataArea)]
+                dataArea.append(leafEntry._data)
+            entry._dataMatrix = [start, len(dataArea)]
             entry._entries = dataArea
 
 
 def B(entry: ERTreeEntry)->List[List[phe.EncryptedNumber]]:
     assert(entry._level == 2)
-    return entry._entries[entry._dataMatrix[0], entry._dataMatrix[0]]
+    return entry._entries
+    # return entry._entries[entry._dataMatrix[0], entry._dataMatrix[1]]
 
 
 def permute(lst: list):
+    if not lst:
+        return []
     return listMoveLeft(lst, 1)
 
 
 def rePermute(lst: list):
+    if not lst:
+        return []
     return listMoveRight(lst, 1)
 
 # A为原始列表，a为左移位数
@@ -303,6 +313,36 @@ def oct2tf(n: int):
     print(res)
 
 
+def buildRtree(points: np.array, min_entries = 3, max_entries = 8) -> RTree:
+    assert(len(points.shape) == 2)
+    assert(points.shape[0] > 0)
+    assert(points.shape[1] > 2)
+    t=RTree(min_entries = min_entries, max_entries = max_entries)
+    for point in points:
+        t.insert(data = point, rect = Rect(point[0], point[1], point[0], point[1]))
+    return t
+        
+    
+
+def test_buildRtree():
+    points = read()
+    t = buildRtree(points)
+    pk, sk = phe.generate_paillier_keypair(n_length=1024)
+    root = encryptRTree(pk, t)
+    count(root, pk)
+    blindEncryptRTree(root)
+    print("done")
+
+def change(a: phe.EncryptedNumber):
+    a.ciphertext = pk.encrypt(0).ciphertext
+
+def test_pass_val_ref():
+    a = pk.encrypt(1)
+    change(a)
+    print(sk.decrypt(a))
+    b = pk.encrypt(2)
+    c = a + b
+    print(sk.decrypt(c))
 if __name__ == "__main__":
     # lst=[0,1,2,3,4,5,6]
     # plst=permute(lst)
@@ -313,5 +353,13 @@ if __name__ == "__main__":
     # test_heap()
     # oct2tf(25*25*25+25*25+24)
     # print(sk.decrypt(phe.EncryptedNumber(pk, 0)) % pk.n)
-    print(2**(32*8) - int(17427837550325006964220455868666983721929980374831474853756604175645848103901551705016654656038859193991389623134168850601886116570446278302448139124273156105094222026291672960014102862164327770489215877638276585344863812851502161610141497115171751335229803121560516637637627245416754744445681414523269559512963359647039465536922203586426184230110563043961412371630170806715482983634832513735409752728092062529689285793697376019849514339399829734002605889047996369105477699482831775883463818492197433378712707377753955038838774017516116050152648829581042874982274332755206412722264817979738249461861780721190932559031))
+    test_pass_val_ref()
+    a = 36491858199304345395830723440730068116670675985920885413929858751583035298478640634876243898885833283323795243091709199590919990587767358686701199256736755051938258340006566604752767074218992506704969047660508439480876542031565811941489417665846657924461460567121984535277781776044850541326889296177331720408
+    b = 109475574597913036187492170322190204350012027957762656241789576254749105895435921904628731696657499849971385729275127598772759971763302076060103597770210265155814775020019699814258301222656977520114907142981525318442629626094697435824468252997539973773384381701365953605833345328134551623980667888531995161229
+    print(b/a)
+    test_buildRtree()
+    print(getMaxBitLength(100))
+    print(getMaxBitLength(1000))
+    print(getMaxBitLength(10000))
+    print(getMaxBitLength(100000))
     print(getMaxBitLength(int(17427837550325006964220455868666983721929980374831474853756604175645848103901551705016654656038859193991389623134168850601886116570446278302448139124273156105094222026291672960014102862164327770489215877638276585344863812851502161610141497115171751335229803121560516637637627245416754744445681414523269559512963359647039465536922203586426184230110563043961412371630170806715482983634832513735409752728092062529689285793697376019849514339399829734002605889047996369105477699482831775883463818492197433378712707377753955038838774017516116050152648829581042874982274332755206412722264817979738249461861780721190932559031)))

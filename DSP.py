@@ -22,7 +22,7 @@ sk = phe.PaillierPrivateKey(pk, *CA_server.getPri())
 assert(sk.decrypt(pk.encrypt(10)) == 10)
 #print("--get done--")
 
-LEFT_BOTTOM_CORNER = -2
+LEFT_BOTTOM_CORNER = 3
 RIGHT_UP_CORNER = 1
 
 
@@ -34,19 +34,15 @@ class DSPServer(SimpleXMLRPCServer):
 
     def __init__(self, addr: tuple, requestHandler) -> None:
         super().__init__(addr, requestHandler, allow_none=True)
-        self.data = [1, 2, 3, 4, 5]
-        self._threshold = 10
+        self.root = None
+        self._threshold = 8
         
         self.DAP_server = xmlrpc.client.ServerProxy("http://localhost:10802")
 
-    def topkQuery(self, k):
-        X = []
-        for i in range(10):
-            X.append([[pk.encrypt(i), pk.encrypt(i+1),
-                     pk.encrypt(i+2)], pk.encrypt(i+10)])
-        # return [[[c.ciphertext() for c in x_i[0]],x_i[1].ciphertext()] for x_i in self._SME(X)]
-        res = self._SME(X)
-        return [[[sk.decrypt(c) for c in x_i[0]], sk.decrypt(x_i[1])] for x_i in res]
+    def topkQuery(self, q: List[int], k: int):
+        q = [phe.EncryptedNumber(pk, val) for val in q]
+        W = self._STLD(self.root, q, k)
+        return [[[sk.decrypt(val) for val in w[0]], sk.decrypt(w[1])] for w in W]
 
     # Secure Minimum Extraction
     def _SME(self, X: list) -> list:
@@ -173,9 +169,10 @@ class DSPServer(SimpleXMLRPCServer):
             for j in range(s, e):
                 C[i] = C[i] + \
                     self._times(Z[j], pow(2, int_bit_length*(e-s-j-1)))
+            idx += num_int_per_ciphertext
 
         ret = self.DAP_server._SVC([c.ciphertext() for c in C], level)
-        print(ret)
+        #print(ret)
 
         res = []
 
@@ -205,13 +202,16 @@ class DSPServer(SimpleXMLRPCServer):
         d_a, d_b = self._SSED(a, q), self._SSED(b, q)
         s_a, s_b = copy.deepcopy(d_a), copy.deepcopy(d_b)
         for i in range(2, len(a)):
-            s_a = s_a+a[i]
-            s_b = s_b+b[i]
+            s_a = s_a + a[i]
+            s_b = s_b + b[i]
         delta = self._SIC(s_b, s_a)
-        if delta == 0:
+        if delta == 1:
             return 0
-        C = self._SVC([d_a].extend([a[i] for i in range(2, len(a))], [
-                      d_b].extend([b[i] for i in range(2, len(b))])), level=0)
+        s_a = [d_a]
+        s_a.extend([a[i] for i in range(2, len(a))])
+        s_b = [d_b]
+        s_b.extend([b[i] for i in range(2, len(b))])
+        C = self._SVC(s_a, s_b, level=0)
         assert(len(C) == len(a)-1)
 
         res = C[0]
@@ -219,83 +219,117 @@ class DSPServer(SimpleXMLRPCServer):
             res = res & C[i]  # self._SM(res, C[i])
         return res
 
-    def _check_in(self, C: List[utility.ERTreeEntry], q: List[phe.EncryptedNumber]) -> int:
-        for idx, o_l in C:
-            if self._SDDC(o_l._rect[LEFT_BOTTOM_CORNER], o_l._rect[RIGHT_UP_CORNER], q) == 1 and\
-                    self._SDDC(o_l._rect[RIGHT_UP_CORNER], o_l._rect[LEFT_BOTTOM_CORNER], q) == 0:
-                return 1
-        return 0
+    def _check_in(self, C: List[utility.ERTreeEntry], o: utility.ERTreeEntry, q: List[phe.EncryptedNumber], isLeaf=False) -> int:
+        if isLeaf:
+            for p in C:
+                if self._SDDC(p._data[0:2], o._rect[RIGHT_UP_CORNER], q) == 1 and\
+                        self._SDDC(p._data[0:2], o._rect[LEFT_BOTTOM_CORNER], q) == 0:
+                    return 1
+            return 0
+        else:
+            for o_l in C:
+                if self._SDDC(o_l._rect[LEFT_BOTTOM_CORNER], o._rect[RIGHT_UP_CORNER], q) == 1 and\
+                        self._SDDC(o_l._rect[RIGHT_UP_CORNER], o._rect[LEFT_BOTTOM_CORNER], q) == 0:
+                    return 1
+            return 0
 
-    def _SLBC(self, Z: utility.ERTreeEntry, q: List[phe.EncryptedNumber], C: List[utility.ERTreeEntry]):
-        for i, o in enumerate(Z._entries):
-            if Z._level > 2 and self._check_in(C, q):
-                self._SLBC(o, q, C)
+    def _SLBC(self, Z: List[utility.ERTreeEntry], q: List[phe.EncryptedNumber], C: List[utility.ERTreeEntry]):
+        for o in Z:
+            if o._level > 2 and self._check_in(C, o, q, False):
+                self._SLBC(o._entries, q, C)
             else:
                 for o_l in C:
-                    if self._SDDC(o_l._rect[LEFT_BOTTOM_CORNER], o_l._rect[RIGHT_UP_CORNER], q) == 1:
-                        o_l._score = (o_l._count) % pk.n
+                    if self._SDDC(o_l._rect[LEFT_BOTTOM_CORNER], o._rect[RIGHT_UP_CORNER], q) == 1:
+                        tmp = o_l._score + o._count
+                        o_l._score.ciphertext = tmp.ciphertext
+    
+    def _SBC(self, Z: List[utility.ERTreeEntry], q: List[phe.EncryptedNumber], C: List[utility.ERTreeEntry]):
+        for o in Z:
+            if o._level > 1 and self._check_in(C, o, q, True):
+                self._SBC(o._entries, q, C)
+            else:
+                for p in C:
+                    if self._SDDC(p._data[0:2], o._rect[RIGHT_UP_CORNER], q) == 1:
+                        tmp = p._score + o._count
+                        p._score.ciphertext = tmp.ciphertext
 
-    def _SLTD(self, root: utility.ERTreeEntry, q: List[phe.EncryptedNumber], k: int):
+    def _STLD(self, root: utility.ERTreeEntry, q: List[phe.EncryptedNumber], k: int):
         H = []
         F = set()
+        F_l = set()
         phi = pk.encrypt(0)
-        self._SLBC(root, q, root._entries)
-        W = []
+        self._SLBC([root], q, [root])
+        W = [[[pk.encrypt(2**64)] * self.dim, pk.encrypt(0)]] * k
 
         EXIST, ANY = 1, 0
 
         def _check_in(o: utility.ERTreeEntry, type=EXIST):
             for p in F:
-                if self._SDDC(p, q, o._rect[LEFT_BOTTOM_CORNER]) == 1:
+                if self._SDDC(p[0:2], o._rect[LEFT_BOTTOM_CORNER], q) == 1:
                     return type == EXIST
             return type != EXIST
 
-        for entry in root._entries:
-            heappush(H, entry)
+        heappush(H, root)
 
         while len(H) > 0:
             o = heappop(H)
-            if self._SIC(entry._score, phi) == 1 and _check_in(o, EXIST):
+            if self._SIC(o._score, phi) == 1 and _check_in(o, EXIST):
                 break
             if o._level > 2:
-                C = [o_c for o_c in o._entries if _check_in(o_c, ANY)]
-                self._SLBC(root, q, C)
-                for o_c in o:
+                Z = o._entries
+                C = [o_c for o_c in Z if _check_in(o_c, ANY)]
+                self._SLBC([root], q, C)
+                for o_c in Z:
                     heappush(H, o_c)
             else:
                 Z = utility.B(o)
-                self.UpdateResult(W, F, Z, q, phi, o)
+                W, F = self.UpdateResult(W, F, F_l, Z, q, phi, o, self.root, k)
         return W
 
     def UpdateResult(self,  W: list,
                      F: set,
-                     Z: List[List[phe.EncryptedNumber]],
+                     F_l: set,
+                     Z: List[utility.ERTreeEntry],
                      q: List[phe.EncryptedNumber],
                      phi: phe.EncryptedNumber,
                      o: utility.ERTreeEntry,
-                     root: utility.ERTreeEntry
+                     root: utility.ERTreeEntry,
+                     k : int
                      ):
         T = set()
         
         EXIST, ANY = 1, 0
 
-        def _check_in(p_e:List[phe.EncryptedNumber], type=ANY):
+        def _check_in(p_e_data: List[phe.EncryptedNumber], type=ANY):
             for p in F:
-                if self._SDDC(p, q, p_e) == 1:
+                if self._SDDC(p, p_e_data, q) == 1:
                     return type == EXIST
             return type != EXIST
         
         for p_e in Z:
-            if _check_in(p_e, ANY):
+            if _check_in(p_e._data, ANY):
                 T.add((p_e, o._score))
         
         if len(T) > self._threshold:
-            self._SLBC(root, q, [p_e for p_e, _ in T])
+            self._SBC([root], q, [p_e for p_e, _ in T])
             for p_e, score in T:
                 epsilon = self._SIC(score, phi, USE_CIPHERTEXT)
                 # k-th phi , how k is determined
-                o_tmp, o_tmp_score = self._SM(epsilon, p_e)
+                o_l = [None] * len(p_e._data)
+                for i in range(len(o_l)):
+                    o_l[i] = self._SM(epsilon, p_e._data[i]) + self._SM(1 - epsilon, W[k - 1][0][i])
+                o_l_score = self._SM(epsilon, score) + self._SM(1 - epsilon, W[k - 1][1]) 
+                for i in range(len(o_l)):
+                    W[k - 1][0][i] = self._SM(epsilon, W[k - 1][0][i]) + self._SM(1 - epsilon, p_e._data[i])
+                W[k - 1][1] = self._SM(epsilon, W[k - 1][1]) + self._SM(1 - epsilon, score)
                 
+                if self._SIC(o_l_score, pk.encrypt(0), USE_PLAINTEXT) == 0 and _check_in(o_l, ANY):
+                    F_l.add(tuple(o_l))
+                W = self._SME(W)
+                phi.ciphertext = W[k - 1][1].ciphertext
+                F = F_l
+                F.add(tuple(W[k - 1][0]))
+        return W, F          
             
 
     # return E(-a)
@@ -311,6 +345,14 @@ class DSPServer(SimpleXMLRPCServer):
     def _SM(self, a: phe.EncryptedNumber, b: phe.EncryptedNumber) -> phe.EncryptedNumber:
         # 稍后修改
         return pk.encrypt(sk.decrypt(a)*sk.decrypt(b))
+    
+    def load(self, filePath = 'data/test_2_12.txt'):
+        points = utility.read(filePath)
+        self.dim = points.shape[1]
+        t = utility.buildRtree(points)
+        self.root = utility.encryptRTree(pk, t)
+        utility.count(self.root, pk)
+        # utility.blindEncryptRTree(self.root)
 
 
 with DSPServer(('localhost', 8000),
@@ -324,15 +366,18 @@ with DSPServer(('localhost', 8000),
     #         func(server,*args)
     #     return wrapper
     # print(server._SIC(pk.encrypt(1), pk.encrypt(2)))  # 1
-    # print(server._SIC(pk.encrypt(1), pk.encrypt(1)))  # 1
     # print(server._SIC(pk.encrypt(2), pk.encrypt(1)))  # 0
-    # print(server._SIC(pk.encrypt(100), pk.encrypt(200)))  # 1
-    print(sk.decrypt(server._SSED(
-        [pk.encrypt(10), pk.encrypt(20)], [pk.encrypt(20), pk.encrypt(10)])))
-    print(server._SVC([pk.encrypt(3), pk.encrypt(1), pk.encrypt(2)], [
-          pk.encrypt(2), pk.encrypt(3), pk.encrypt(4)]))
+    # print(server._SIC(pk.encrypt(0), pk.encrypt(0)))  # 1
+    # print(server._SIC(pk.encrypt(1), pk.encrypt(1000000)))  # 1
+    # print(server._SIC(pk.encrypt(1000000), pk.encrypt(1)))  # 0
+    # print(sk.decrypt(server._SSED(
+    #     [pk.encrypt(10), pk.encrypt(20)], [pk.encrypt(20), pk.encrypt(10)])))
+    # print(server._SVC([pk.encrypt(3), pk.encrypt(1), pk.encrypt(2)], [
+    #       pk.encrypt(2), pk.encrypt(3), pk.encrypt(4)]))
     # .DAP_server._SVC([pk.encrypt((-55340232234013556739)%pk.n).ciphertext()])
-
+    server.load()
+    server._SDDC([pk.encrypt(10), pk.encrypt(10), pk.encrypt(8), pk.encrypt(14)], [pk.encrypt(20), pk.encrypt(20), pk.encrypt(16), pk.encrypt(31)], [pk.encrypt(5), pk.encrypt(5)])
+    print(server.topkQuery([pk.encrypt(1).ciphertext(), pk.encrypt(2).ciphertext()], 2))
     server.register_introspection_functions()
 
     server.register_function(server.topkQuery, name="topkQuery")

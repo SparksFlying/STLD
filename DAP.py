@@ -94,7 +94,9 @@ with DAPServer(('localhost', 10802),
     print(server)
 
     server.register_introspection_functions()
-
+    #
+    Y = [[0, pk.encrypt(12).ciphertext()], [1, pk.encrypt(12).ciphertext()]]
+    server._SME(Y)
     server.register_function(server._SME, name="_SME")
     server.register_function(server._SIC, name="_SIC")
     server.register_function(server._SVC, name="_SVC")
